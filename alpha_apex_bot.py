@@ -24,9 +24,9 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def fetch_market_candles():
-    """Binance Public API se BTCUSDT M5 candles fetch karne ke liye"""
-    url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50"
+def fetch_crypto_candles(symbol):
+    """Binance Public API se Crypto M5 candles fetch karne ke liye"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=50"
     res = requests.get(url, timeout=10)
     data = res.json()
     
@@ -43,7 +43,7 @@ def fetch_market_candles():
     df['volume'] = df['volume'].astype(float)
     return df
 
-def analyze_alpha_apex(df):
+def analyze_alpha_apex(df, pair_name):
     """AlphaApex Core Strategy Logic Engine"""
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['vol_sma20'] = df['volume'].rolling(window=20).mean()
@@ -70,6 +70,7 @@ def analyze_alpha_apex(df):
         tp_price = round(latest['close'] + (latest['close'] - sl_price) * 2.5, 2)
         
         return {
+            "asset": pair_name,
             "type": "BUY / LONG 🟢",
             "price": latest['close'],
             "sl": sl_price,
@@ -84,49 +85,62 @@ def analyze_alpha_apex(df):
         tp_price = round(latest['close'] - (sl_price - latest['close']) * 2.5, 2)
         
         return {
+            "asset": pair_name,
             "type": "SELL / SHORT 🔴",
             "price": latest['close'],
             "sl": sl_price,
             "tp": tp_price,
             "wick": round(upper_wick_ratio * 100, 1),
+            "vol_mult": round(upper_wick_ratio * 100, 1),
             "vol_mult": round(latest['volume'] / latest['vol_sma20'], 2)
         }
         
     return None
 
 def main():
-    print(f"[{datetime.datetime.now()}] Analyzing Market Conditions...")
-    try:
-        df = fetch_market_candles()
-        signal = analyze_alpha_apex(df)
-        
-        if signal:
-            # UNIQUE TERMINAL FORMAT MESSAGE
-            msg = (
-                f"⚡ *[ ALPHA-APEX INSTITUTIONAL ALERT ]* ⚡\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📊 *Asset:* BTC/USD (M5 Timeframe)\n"
-                f"🎯 *Direction:* {signal['type']}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📍 *Entry Price:* `${signal['price']}`\n"
-                f"🛡️ *Stop Loss:* `${signal['sl']}`\n"
-                f"🎯 *Target TP:* `${signal['tp']}`\n"
-                f"⚖️ *Risk-Reward:* 1 : 2.50\n\n"
-                f"📈 *ANALYSIS METRICS*\n"
-                f"• Wick Absorption : `{signal['wick']}%` 🎯\n"
-                f"• Volume Spike    : `{signal['vol_mult']}x` SMA20 💥\n\n"
-                f"⚠️ *ACTION REQUIRED:*\n"
-                f"Open Exness MT5 -> Confirm Price Action -> Execute Position.\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⏰ *Time:* {datetime.datetime.now().strftime('%d %b %Y | %I:%M %p')} IST"
-            )
-            send_telegram_alert(msg)
-        else:
-            print("No high-probability AlphaApex setup detected on this candle.")
+    print(f"[{datetime.datetime.now()}] Multi-Asset Scanning Started...")
+    
+    # Monitored Crypto Pairs
+    crypto_symbols = {
+        "BTCUSDT": "BTC/USD (Bitcoin)",
+        "ETHUSDT": "ETH/USD (Ethereum)",
+        "SOLUSDT": "SOL/USD (Solana)",
+        "XRPUSDT": "XRP/USD (Ripple)"
+    }
+    
+    # Scan Cryptos
+    for symbol, display_name in crypto_symbols.items():
+        try:
+            df = fetch_crypto_candles(symbol)
+            signal = analyze_alpha_apex(df, display_name)
             
-    except Exception as e:
-        print(f"Execution Error: {e}")
+            if signal:
+                msg = (
+                    f"⚡ *[ ALPHA-APEX INSTITUTIONAL ALERT ]* ⚡\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 *Asset:* `{signal['asset']}` (M5)\n"
+                    f"🎯 *Direction:* {signal['type']}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📍 *Entry Price:* `${signal['price']}`\n"
+                    f"🛡️ *Stop Loss:* `${signal['sl']}`\n"
+                    f"🎯 *Target TP:* `${signal['tp']}`\n"
+                    f"⚖️ *Risk-Reward:* 1 : 2.50\n\n"
+                    f"📈 *ANALYSIS METRICS*\n"
+                    f"• Wick Absorption : `{signal['wick']}%` 🎯\n"
+                    f"• Volume Spike    : `{signal['vol_mult']}x` SMA20 💥\n\n"
+                    f"⚠️ *ACTION REQUIRED:*\n"
+                    f"Check MT5 Chart -> Confirm Context -> Execute Order.\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏰ *Time:* {datetime.datetime.now().strftime('%d %b %Y | %I:%M %p')} IST"
+                )
+                send_telegram_alert(msg)
+            else:
+                print(f"No setup for {display_name}")
+        except Exception as e:
+            print(f"Error scanning {symbol}: {e}")
+            
+    print(f"[{datetime.datetime.now()}] Scan Complete.")
 
 if __name__ == "__main__":
     main()
-    
+            
