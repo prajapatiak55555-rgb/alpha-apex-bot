@@ -1,14 +1,14 @@
-import requests
-import datetime
 import pandas as pd
 import numpy as np
+import requests
+import datetime
 
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = "8973233256:AAGu3FsMR1C6hzr9xoPDD4W7f2NZtu_ijE0"
 TELEGRAM_CHAT_ID = "8762446105"
 
 def send_telegram_alert(message):
-    """Telegram par signal message bhejne ka function"""
+    """Telegram par unique format mein message bhejne ka function"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -45,14 +45,11 @@ def fetch_market_candles():
 
 def analyze_alpha_apex(df):
     """AlphaApex Core Strategy Logic Engine"""
-    # 1. Moving Averages
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['vol_sma20'] = df['volume'].rolling(window=20).mean()
     
     latest = df.iloc[-1]
-    prev = df.iloc[-2]
     
-    # Candle metrics
     candle_range = latest['high'] - latest['low']
     if candle_range == 0:
         return None
@@ -67,13 +64,13 @@ def analyze_alpha_apex(df):
     vol_spike = latest['volume'] > (1.2 * latest['vol_sma20'])
     
     # --- STRATEGY SIGNAL GENERATION ---
-    # BUY Signal: Bullish Trend + Volume Spike + >40% Lower Wick Absorption
+    # BUY Signal
     if latest['close'] > latest['ema20'] and vol_spike and lower_wick_ratio >= 0.40:
         sl_price = round(latest['low'] * 0.998, 2)
         tp_price = round(latest['close'] + (latest['close'] - sl_price) * 2.5, 2)
         
         return {
-            "type": "BUY 🟢",
+            "type": "BUY / LONG 🟢",
             "price": latest['close'],
             "sl": sl_price,
             "tp": tp_price,
@@ -81,13 +78,13 @@ def analyze_alpha_apex(df):
             "vol_mult": round(latest['volume'] / latest['vol_sma20'], 2)
         }
         
-    # SELL Signal: Bearish Trend + Volume Spike + >40% Upper Wick Absorption
+    # SELL Signal
     elif latest['close'] < latest['ema20'] and vol_spike and upper_wick_ratio >= 0.40:
         sl_price = round(latest['high'] * 1.002, 2)
         tp_price = round(latest['close'] - (sl_price - latest['close']) * 2.5, 2)
         
         return {
-            "type": "SELL 🔴",
+            "type": "SELL / SHORT 🔴",
             "price": latest['close'],
             "sl": sl_price,
             "tp": tp_price,
@@ -104,15 +101,24 @@ def main():
         signal = analyze_alpha_apex(df)
         
         if signal:
+            # UNIQUE TERMINAL FORMAT MESSAGE
             msg = (
-                f"🚨 *ALPHA APEX TRADING SIGNAL* 🚨\n\n"
-                f"**Asset:** BTCUSD (M5)\n"
-                f"**Signal Type:** {signal['type']}\n"
-                f"**Entry Price:** ${signal['price']}\n"
-                f"**Suggested SL:** ${signal['sl']}\n"
-                f"**Suggested TP (2.5 RR):** ${signal['tp']}\n\n"
-                f"📊 *Metrics:* Wick Absorption: {signal['wick']}% | Volume: {signal['vol_mult']}x SMA\n"
-                f"📌 *Action:* Exness MT5 app khol kar confirmation ke sath trade place karein."
+                f"⚡ *[ ALPHA-APEX INSTITUTIONAL ALERT ]* ⚡\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 *Asset:* BTC/USD (M5 Timeframe)\n"
+                f"🎯 *Direction:* {signal['type']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📍 *Entry Price:* `${signal['price']}`\n"
+                f"🛡️ *Stop Loss:* `${signal['sl']}`\n"
+                f"🎯 *Target TP:* `${signal['tp']}`\n"
+                f"⚖️ *Risk-Reward:* 1 : 2.50\n\n"
+                f"📈 *ANALYSIS METRICS*\n"
+                f"• Wick Absorption : `{signal['wick']}%` 🎯\n"
+                f"• Volume Spike    : `{signal['vol_mult']}x` SMA20 💥\n\n"
+                f"⚠️ *ACTION REQUIRED:*\n"
+                f"Open Exness MT5 -> Confirm Price Action -> Execute Position.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ *Time:* {datetime.datetime.now().strftime('%d %b %Y | %I:%M %p')} IST"
             )
             send_telegram_alert(msg)
         else:
