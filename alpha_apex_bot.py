@@ -8,8 +8,14 @@ import yfinance as yf
 TELEGRAM_BOT_TOKEN = "8973233256:AAGu3FsMR1C6hzr9xoPDD4W7f2NZtu_ijE0"
 TELEGRAM_CHAT_ID = "8762446105"
 
+# Account Risk Config for Lot Size Calculation
+ACCOUNT_RISK_USD = 10.0  # Change according to your risk preference per trade ($10, $20, etc.)
+
+# Memory to store last alert time to prevent Telegram spam
+LAST_ALERTS = {}
+
 def send_telegram_alert(message):
-    """Telegram alert sender"""
+    """Telegram alert sender function"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -25,9 +31,42 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def fetch_crypto_candles(symbol):
-    """Fetch M5 candles from Binance for Cryptos"""
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=50"
+def is_active_session(is_crypto=False):
+    """Filter non-crypto assets during off-market/low-volume hours"""
+    if is_crypto:
+        return True  # Crypto markets run 24/7
+    
+    # Check current time in UTC/IST for High Volatility Sessions
+    # London: 13:00 - 17:00 IST | New York: 18:30 - 23:30 IST
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    current_hour = now_utc.hour
+    
+    # Active Forex/Index hours in UTC (approx 07:00 to 20:00 UTC)
+    if 7 <= current_hour <= 20:
+        return True
+    return False
+
+def calculate_lot_size(entry, sl, asset_name):
+    """Calculate recommended MT5 position size for defined risk"""
+    sl_distance = abs(entry - sl)
+    if sl_distance == 0:
+        return "N/A"
+    
+    # Rough lot sizing calculation logic based on asset type
+    if "BTC" in asset_name:
+        lots = ACCOUNT_RISK_USD / sl_distance
+        return f"`{round(lots, 3)}` BTC"
+    elif "Gold" in asset_name or "XAU" in asset_name:
+        # 1 lot Gold = 100 oz ($1 move = $100 per 1.0 lot)
+        lots = ACCOUNT_RISK_USD / (sl_distance * 100)
+        return f"`{max(0.01, round(lots, 2))}` Lots"
+    else:
+        lots = ACCOUNT_RISK_USD / (sl_distance * 10)
+        return f"`{max(0.01, round(lots, 2))}` Lots"
+
+def fetch_crypto_candles(symbol, interval="5m"):
+    """Fetch candles from Binance"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=50"
     res = requests.get(url, timeout=10)
     data = res.json()
     
@@ -41,10 +80,11 @@ def fetch_crypto_candles(symbol):
         df[col] = df[col].astype(float)
     return df
 
-def fetch_traditional_candles(ticker_symbol):
-    """Fetch M5 candles via Yahoo Finance for Gold & Indices"""
+def fetch_traditional_candles(ticker_symbol, interval="5m"):
+    """Fetch candles from Yahoo Finance"""
     ticker = yf.Ticker(ticker_symbol)
-    df = ticker.history(period="1d", interval="5m")
+    period = "1d" if interval in ["5m", "15m"] else "5d"
+    df = ticker.history(period=period, interval=interval)
     if df.empty:
         return None
     df = df.rename(columns={
@@ -53,65 +93,123 @@ def fetch_traditional_candles(ticker_symbol):
     })
     return df
 
-def analyze_alpha_apex(df, pair_name):
-    """AlphaApex Core Strategy Logic Engine"""
-    if df is None or len(df) < 20:
+def analyze_alpha_apex(df_m5, df_m15, pair_name):
+    """Core Strategy Logic with Multi-Timeframe Confluence"""
+    if df_m5 is None or len(df_m5) < 20 or df_m15 is None or len(df_m15) < 20:
         return None
         
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['vol_sma20'] = df['volume'].rolling(window=20).mean()
+    # Moving Averages & Volume Metrics
+    df_m5['ema20'] = df_m5['close'].ewm(span=20, adjust=False).mean()
+    df_m5['vol_sma20'] = df_m5['volume'].rolling(window=20).mean()
+    df_m15['ema20'] = df_m15['close'].ewm(span=20, adjust=False).mean()
     
-    latest = df.iloc[-1]
+    latest_m5 = df_m5.iloc[-1]
+    latest_m15 = df_m15.iloc[-1]
     
-    candle_range = latest['high'] - latest['low']
+    candle_range = latest_m5['high'] - latest_m5['low']
     if candle_range == 0:
         return None
         
-    lower_wick = min(latest['open'], latest['close']) - latest['low']
-    upper_wick = latest['high'] - max(latest['open'], latest['close'])
+    lower_wick = min(latest_m5['open'], latest_m5['close']) - latest_m5['low']
+    upper_wick = latest_m5['high'] - max(latest_m5['open'], latest_m5['close'])
     
     lower_wick_ratio = lower_wick / candle_range
     upper_wick_ratio = upper_wick / candle_range
     
-    vol_avg = latest['vol_sma20'] if latest['vol_sma20'] > 0 else 1
-    vol_spike = latest['volume'] > (1.2 * vol_avg)
+    vol_avg = latest_m5['vol_sma20'] if latest_m5['vol_sma20'] > 0 else 1
+    vol_spike = latest_m5['volume'] > (1.2 * vol_avg)
     
-    # BUY Signal
-    if latest['close'] > latest['ema20'] and vol_spike and lower_wick_ratio >= 0.40:
-        sl_price = round(latest['low'] * 0.998, 2)
-        tp_price = round(latest['close'] + (latest['close'] - sl_price) * 2.5, 2)
+    # Trend Confluence (M5 and M15 must agree)
+    m5_bullish = latest_m5['close'] > latest_m5['ema20']
+    m15_bullish = latest_m15['close'] > latest_m15['ema20']
+    
+    m5_bearish = latest_m5['close'] < latest_m5['ema20']
+    m15_bearish = latest_m15['close'] < latest_m15['ema20']
+    
+    # --- BUY SIGNAL ---
+    if m5_bullish and m15_bullish and vol_spike and lower_wick_ratio >= 0.40:
+        sl_price = round(latest_m5['low'] * 0.998, 2)
+        tp_price = round(latest_m5['close'] + (latest_m5['close'] - sl_price) * 2.5, 2)
         
         return {
             "asset": pair_name,
             "type": "BUY / LONG 🟢",
-            "price": round(latest['close'], 2),
+            "price": round(latest_m5['close'], 2),
             "sl": sl_price,
             "tp": tp_price,
             "wick": round(lower_wick_ratio * 100, 1),
-            "vol_mult": round(latest['volume'] / vol_avg, 2)
+            "vol_mult": round(latest_m5['volume'] / vol_avg, 2),
+            "mtf": "M5 + M15 Bullish Alignment ✅"
         }
         
-    # SELL Signal
-    elif latest['close'] < latest['ema20'] and vol_spike and upper_wick_ratio >= 0.40:
-        sl_price = round(latest['high'] * 1.002, 2)
-        tp_price = round(latest['close'] - (sl_price - latest['close']) * 2.5, 2)
+    # --- SELL SIGNAL ---
+    elif m5_bearish and m15_bearish and vol_spike and upper_wick_ratio >= 0.40:
+        sl_price = round(latest_m5['high'] * 1.002, 2)
+        tp_price = round(latest_m5['close'] - (sl_price - latest_m5['close']) * 2.5, 2)
         
         return {
             "asset": pair_name,
             "type": "SELL / SHORT 🔴",
-            "price": round(latest['close'], 2),
+            "price": round(latest_m5['close'], 2),
             "sl": sl_price,
             "tp": tp_price,
             "wick": round(upper_wick_ratio * 100, 1),
-            "vol_mult": round(latest['volume'] / vol_avg, 2)
+            "vol_mult": round(latest_m5['volume'] / vol_avg, 2),
+            "mtf": "M5 + M15 Bearish Alignment ✅"
         }
         
     return None
 
-def main():
-    print(f"[{datetime.datetime.now()}] Scanning All Assets...")
+def process_asset(display_name, fetch_func, symbol, is_crypto=False):
+    """Processes asset scanning and prevents duplicate spam alerts"""
+    if not is_active_session(is_crypto):
+        print(f"Skipping {display_name}: Market session inactive.")
+        return
+
+    # Check Anti-Spam Cool-off (20 Minutes threshold)
+    now = datetime.datetime.now()
+    if display_name in LAST_ALERTS:
+        time_diff = (now - LAST_ALERTS[display_name]).total_seconds() / 60
+        if time_diff < 20:
+            print(f"Skipping {display_name}: Cooldown active ({int(20 - time_diff)} mins left)")
+            return
+
+    df_m5 = fetch_func(symbol, interval="5m")
+    df_m15 = fetch_func(symbol, interval="15m")
     
-    # 1. Crypto Pairs
+    signal = analyze_alpha_apex(df_m5, df_m15, display_name)
+    
+    if signal:
+        LAST_ALERTS[display_name] = now
+        lot_guide = calculate_lot_size(signal['price'], signal['sl'], display_name)
+        
+        msg = (
+            f"⚡ *[ ALPHA-APEX INSTITUTIONAL ALERT ]* ⚡\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 *Asset:* `{signal['asset']}`\n"
+            f"🎯 *Direction:* {signal['type']}\n"
+            f"🧬 *Confluence:* `{signal['mtf']}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 *Entry Price:* `${signal['price']}`\n"
+            f"🛡️ *Stop Loss:* `${signal['sl']}`\n"
+            f"🎯 *Target TP:* `${signal['tp']}`\n"
+            f"⚖️ *Risk-Reward:* 1 : 2.50\n"
+            f"💰 *Calculated Size:* {lot_guide} (for ${int(ACCOUNT_RISK_USD)} Risk)\n\n"
+            f"📈 *ANALYSIS METRICS*\n"
+            f"• Wick Absorption : `{signal['wick']}%` 🎯\n"
+            f"• Volume Spike    : `{signal['vol_mult']}x` SMA20 💥\n\n"
+            f"⚠️ *ACTION REQUIRED:*\n"
+            f"Open Exness MT5 -> Check Chart -> Execute Trade.\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏰ *Time:* {datetime.datetime.now().strftime('%d %b %Y | %I:%M %p')} IST"
+        )
+        send_telegram_alert(msg)
+    else:
+        print(f"No high-confluence setup for {display_name}")
+
+def main():
+    print(f"[{datetime.datetime.now()}] Full Strategy Scan Started...")
+    
     crypto_symbols = {
         "BTCUSDT": "BTC/USD (Bitcoin)",
         "ETHUSDT": "ETH/USD (Ethereum)",
@@ -119,57 +217,25 @@ def main():
         "XRPUSDT": "XRP/USD (Ripple)"
     }
     
-    # 2. Gold & Major US Indices
     traditional_assets = {
         "GC=F": "XAU/USD (Gold Spot)",
         "^DJI": "US30 (Dow Jones)",
         "^IXIC": "NAS100 (Nasdaq 100)"
     }
     
-    # Scan Crypto
-    for symbol, display_name in crypto_symbols.items():
+    # Scan Cryptos
+    for symbol, name in crypto_symbols.items():
         try:
-            df = fetch_crypto_candles(symbol)
-            signal = analyze_alpha_apex(df, display_name)
-            if signal:
-                send_signal_alert(signal)
-            else:
-                print(f"No setup for {display_name}")
+            process_asset(name, fetch_crypto_candles, symbol, is_crypto=True)
         except Exception as e:
-            print(f"Error scanning {symbol}: {e}")
+            print(f"Error scanning {name}: {e}")
             
     # Scan Gold & Indices
-    for ticker, display_name in traditional_assets.items():
+    for ticker, name in traditional_assets.items():
         try:
-            df = fetch_traditional_candles(ticker)
-            signal = analyze_alpha_apex(df, display_name)
-            if signal:
-                send_signal_alert(signal)
-            else:
-                print(f"No setup for {display_name}")
+            process_asset(name, fetch_traditional_candles, ticker, is_crypto=False)
         except Exception as e:
-            print(f"Error scanning {display_name}: {e}")
-
-def send_signal_alert(signal):
-    msg = (
-        f"⚡ *[ ALPHA-APEX INSTITUTIONAL ALERT ]* ⚡\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *Asset:* `{signal['asset']}` (M5)\n"
-        f"🎯 *Direction:* {signal['type']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📍 *Entry Price:* `${signal['price']}`\n"
-        f"🛡️ *Stop Loss:* `${signal['sl']}`\n"
-        f"🎯 *Target TP:* `${signal['tp']}`\n"
-        f"⚖️ *Risk-Reward:* 1 : 2.50\n\n"
-        f"📈 *ANALYSIS METRICS*\n"
-        f"• Wick Absorption : `{signal['wick']}%` 🎯\n"
-        f"• Volume Spike    : `{signal['vol_mult']}x` SMA20 💥\n\n"
-        f"⚠️ *ACTION REQUIRED:*\n"
-        f"Open Exness MT5 -> Confirm Chart -> Execute Position.\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ *Time:* {datetime.datetime.now().strftime('%d %b %Y | %I:%M %p')} IST"
-    )
-    send_telegram_alert(msg)
+            print(f"Error scanning {name}: {e}")
 
 if __name__ == "__main__":
     main()
