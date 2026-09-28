@@ -1,15 +1,17 @@
-name: Alpha Apex Bot
+name: Alpha Apex Bot Schedule
 
 on:
+  workflow_dispatch: # Manual Run Button active rakhta hai
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    # Continuous Background Scan (Har 15 minute mein apne aap chalega)
+    - cron: '*/15 * * * *'
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -22,6 +24,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests yfinance
 
-      - name: Run Trading Bot
+      - name: Execute Super Pro Max Engine
         run: python alpha_apex_bot.py
         
